@@ -1,0 +1,95 @@
+name: Build & Translate Cookie Data
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'excel-to-json.py'
+      - 'json_translator_rewrite.py'
+      - 'translation_key.json'
+      - '**.xlsx'
+      - '.github/workflows/build-translate.yml'
+      - 'requirements.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-translate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas openpyxl python-dateutil
+          fi
+
+      # --- Step 1: Excel -> JSON ---
+      # Try common CLI signatures. If your excel-to-json.py needs specific flags,
+      # adjust the first command and remove the fallbacks.
+      - name: Convert Excel to converted_cookie_data.json
+        shell: bash
+        run: |
+          set -e
+          # Try explicit args first (adjust to your script's interface if needed)
+          python excel-to-json.py --input "2Kopia av hm-cookielist.xlsx" --output converted_cookie_data.json || \
+          python excel-to-json.py "2Kopia av hm-cookielist.xlsx" "converted_cookie_data.json" || \
+          python excel-to-json.py
+
+          test -f converted_cookie_data.json || { echo "converted_cookie_data.json was not created"; exit 1; }
+
+      # --- Step 2: Translate JSON for all locales ---
+      - name: Generate localized JSONs (pretty + minified)
+        run: |
+          # json_translator_rewrite.py already defaults to using files next to the script,
+          # and writes pretty files to ./out and minified files to ./minified.
+          python json_translator_rewrite.py --translate_keys
+
+      # --- Step 3: Upload artifacts ---
+      - name: Upload pretty JSONs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cookie-jsons-pretty
+          path: out/
+          if-no-files-found: error
+
+      - name: Upload minified JSONs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cookie-jsons-minified
+          path: minified/
+          if-no-files-found: error
+
+      # OPTIONAL: commit generated files back to repo (uncomment to enable)
+      # - name: Commit generated files
+      #   uses: stefanzweifel/git-auto-commit-action@v5
+      #   with:
+      #     commit_message: "chore: update localized cookie JSONs"
+      #     file_pattern: out/** minified/**
+      #     branch: ${{ github.ref_name }}
