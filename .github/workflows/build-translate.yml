@@ -22,6 +22,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Proofreading export mode: "csv" (default) or "text"
+      PROOFREAD_EXPORT_MODE: csv
 
     steps:
       - name: Checkout
@@ -48,41 +51,29 @@ jobs:
             pip install pandas openpyxl python-dateutil
           fi
 
-      # -------- Step 1: Excel -> converted_cookie_data.json --------
+      # Step 1: Excel -> converted_cookie_data.json
       - name: Convert Excel to converted_cookie_data.json
         run: |
-          set -euo pipefail
-          echo "Repository contents (top-level):"
-          ls -la
-
           python excel-to-json.py
           test -f converted_cookie_data.json || { echo "::error::converted_cookie_data.json was not created"; exit 1; }
 
-          echo "Head of converted_cookie_data.json:"
-          head -n 50 converted_cookie_data.json || true
-
-      # -------- Step 2: Translate JSON for all locales (pretty + minified) --------
+      # Step 2: Translate JSON into all locales (pretty + minified)
       - name: Generate localized JSONs (pretty + minified)
         id: translate
         shell: bash
         run: |
-          set -euo pipefail
-          # Force-safe: deletes FILEs named out/minified if they exist, or creates fallbacks.
           python json_translator_rewrite.py --translate_keys --force
 
-          # Determine actual pretty/minified directories (out or fallback out_build-*)
           OUT_DIR="out"
           MIN_DIR="minified"
 
           if [ ! -d "$OUT_DIR" ]; then
             OUT_DIR="$(ls -d out_build-* 2>/dev/null | head -n1 || true)"
           fi
-
           if [ ! -d "$MIN_DIR" ]; then
             MIN_DIR="$(ls -d minified_build-* 2>/dev/null | head -n1 || true)"
           fi
 
-          # Validate
           if [ -z "$OUT_DIR" ] || [ ! -d "$OUT_DIR" ]; then
             echo "::error::Pretty output directory not found."
             exit 1
@@ -92,42 +83,137 @@ jobs:
             exit 1
           fi
 
-          echo "Using pretty dir: $OUT_DIR"
-          echo "Using minified dir: $MIN_DIR"
-          test -n "$(ls -A "$OUT_DIR")" || { echo "::error::No files in $OUT_DIR"; exit 1; }
-          test -n "$(ls -A "$MIN_DIR")" || { echo "::error::No files in $MIN_DIR"; exit 1; }
-
           echo "out_dir=$OUT_DIR" >> "$GITHUB_OUTPUT"
           echo "min_dir=$MIN_DIR" >> "$GITHUB_OUTPUT"
 
-      # -------- Step 3: Upload artifacts --------
-      - name: Upload pretty JSONs
-        uses: actions/upload-artifact@v4
-        with:
-          name: cookie-jsons-pretty
-          path: ${{ steps.translate.outputs.out_dir }}
-          if-no-files-found: error
+      # ----------------- NEW: Proofreading export from out/ only -----------------
 
-      - name: Upload minified JSONs
-        uses: actions/upload-artifact@v4
-        with:
-          name: cookie-jsons-minified
-          path: ${{ steps.translate.outputs.min_dir }}
-          if-no-files-found: error
-
-      # -------- Optional diagnostics --------
-      - name: Show sample outputs
-        if: always()
+      # CSV mode: one CSV per locale in proofread_csv/
+      - name: Export translated JSONs to CSV (one per locale)
+        if: env.PROOFREAD_EXPORT_MODE == 'csv'
         run: |
-          echo "== Pretty files =="
-          ls -la "${{ steps.translate.outputs.out_dir }}" | head -n 40 || true
-          echo "== Minified files =="
-          ls -la "${{ steps.translate.outputs.min_dir }}" | head -n 40 || true
+          set -euo pipefail
+          OUT_DIR="${{ steps.translate.outputs.out_dir }}"
+          mkdir -p proofread_csv
+          python - << 'PY'
+import json, csv, os, sys, glob
 
-      # -------- OPTIONAL: commit generated files back to repo (disabled) --------
-      # - name: Commit generated files
-      #   uses: stefanzweifel/git-auto-commit-action@v5
-      #   with:
-      #     commit_message: "chore: update localized cookie JSONs"
-      #     file_pattern: ${{ steps.translate.outputs.out_dir }}/** ${{ steps.translate.outputs.min_dir }}/**
-      #     branch: ${{ github.ref_name }}
+out_dir = os.environ.get("OUT_DIR", "out")
+dest = "proofread_csv"
+os.makedirs(dest, exist_ok=True)
+
+files = sorted(glob.glob(os.path.join(out_dir, "cookie_data_*.json")))
+if not files:
+    print("No translated JSONs found in", out_dir, file=sys.stderr)
+    sys.exit(1)
+
+for path in files:
+    locale = os.path.splitext(os.path.basename(path))[0].replace("cookie_data_", "")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Expected structure:
+    # { "notice_table": [ { "cookie_category": ..., "category_description": ..., "cookie_list": [ {<localized headers>...}, ... ] }, ... ] }
+    rows = []
+    # Build a union of all column names found across cookie_list items in this locale
+    dynamic_cols = set()
+    for block in data.get("notice_table", []):
+        clist = block.get("cookie_list", [])
+        for item in clist:
+            dynamic_cols.update(item.keys())
+
+    dynamic_cols = list(dynamic_cols)  # localized headers for this locale
+    # We'll place cookie_category and category_description first, then the localized columns
+    header = ["cookie_category", "category_description"] + dynamic_cols
+
+    for block in data.get("notice_table", []):
+        cat = block.get("cookie_category", "")
+        desc = block.get("category_description", "")
+        for item in block.get("cookie_list", []):
+            row = {h: "" for h in header}
+            row["cookie_category"] = cat
+            row["category_description"] = desc
+            for k, v in item.items():
+                row[k] = v
+            rows.append(row)
+
+    csv_path = os.path.join(dest, f"{locale}.csv")
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(rows)
+    print("Wrote", csv_path)
+PY
+          echo "CSV export complete."
+          ls -la proofread_csv | head -n 50 || true
+
+      - name: Upload proofreading CSVs
+        if: env.PROOFREAD_EXPORT_MODE == 'csv'
+        uses: actions/upload-artifact@v4
+        with:
+          name: translated-csv-proofread
+          path: proofread_csv/
+          if-no-files-found: error
+
+      # Text mode: one UTF-8 text file with tables grouped by locale
+      - name: Export translated JSONs to a single text file (tables)
+        if: env.PROOFREAD_EXPORT_MODE == 'text'
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ steps.translate.outputs.out_dir }}"
+          python - << 'PY'
+import json, os, sys, glob
+
+out_dir = os.environ.get("OUT_DIR", "out")
+outfile = "proofread_tables.txt"
+
+files = sorted(glob.glob(os.path.join(out_dir, "cookie_data_*.json")))
+if not files:
+    print("No translated JSONs found in", out_dir, file=sys.stderr)
+    sys.exit(1)
+
+def line():
+    return "-" * 80 + "\n"
+
+with open(outfile, "w", encoding="utf-8") as out:
+    for path in files:
+        locale = os.path.splitext(os.path.basename(path))[0].replace("cookie_data_", "")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        out.write(f"=== {locale} ===\n")
+        for block in data.get("notice_table", []):
+            cat = block.get("cookie_category", "")
+            desc = block.get("category_description", "")
+            out.write(line())
+            out.write(f"Category: {cat}\n")
+            out.write(f"Description: {desc}\n")
+            out.write(line())
+
+            # compute union of keys for table header (localized per locale)
+            keys = set()
+            for item in block.get("cookie_list", []):
+                keys.update(item.keys())
+            keys = list(keys)
+
+            # header
+            out.write(" | ".join(keys) + "\n")
+            out.write("-|-".join("-" * len(k) for k in keys) + "\n")
+
+            # rows
+            for item in block.get("cookie_list", []):
+                out.write(" | ".join(str(item.get(k, "")) for k in keys) + "\n")
+            out.write("\n")
+        out.write("\n")
+
+print(f"Wrote {outfile}")
+PY
+          ls -lh proofread_tables.txt
+
+      - name: Upload proofreading text
+        if: env.PROOFREAD_EXPORT_MODE == 'text'
+        uses: actions/upload-artifact@v4
+        with:
+          name: translated-text-proofread
+          path: proofread_tables.txt
+          if-no-files-found: error
