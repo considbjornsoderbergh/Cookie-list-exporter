@@ -44,6 +44,7 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        shell: bash
         run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
@@ -53,6 +54,7 @@ jobs:
 
       # Step 1: Excel -> converted_cookie_data.json
       - name: Convert Excel to converted_cookie_data.json
+        shell: bash
         run: |
           python excel-to-json.py
           test -f converted_cookie_data.json || { echo "::error::converted_cookie_data.json was not created"; exit 1; }
@@ -90,7 +92,8 @@ jobs:
 
       # CSV mode: one CSV per locale in proofread_csv/
       - name: Export translated JSONs to CSV (one per locale)
-        if: ${{ env.PROOFREAD_EXPORT_MODE == 'csv' }}
+        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'csv') }}
+        shell: bash
         run: |
           set -euo pipefail
           export OUT_DIR="${{ steps.translate.outputs.out_dir }}"
@@ -112,8 +115,7 @@ for path in files:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    rows = []
-    # Union of localized column names across items
+    # union of localized column names
     dynamic_cols = set()
     for block in data.get("notice_table", []):
         for item in block.get("cookie_list", []):
@@ -121,6 +123,7 @@ for path in files:
     dynamic_cols = list(dynamic_cols)
 
     header = ["cookie_category", "category_description"] + dynamic_cols
+    rows = []
 
     for block in data.get("notice_table", []):
         cat = block.get("cookie_category", "")
@@ -144,7 +147,7 @@ PY
           ls -la proofread_csv | head -n 50 || true
 
       - name: Upload proofreading CSVs
-        if: ${{ env.PROOFREAD_EXPORT_MODE == 'csv' }}
+        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'csv') }}
         uses: actions/upload-artifact@v4
         with:
           name: translated-csv-proofread
@@ -153,7 +156,8 @@ PY
 
       # Text mode: single UTF-8 text file with tables
       - name: Export translated JSONs to a single text file (tables)
-        if: ${{ env.PROOFREAD_EXPORT_MODE == 'text' }}
+        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'text') }}
+        shell: bash
         run: |
           set -euo pipefail
           export OUT_DIR="${{ steps.translate.outputs.out_dir }}"
@@ -203,7 +207,7 @@ PY
           ls -lh proofread_tables.txt
 
       - name: Upload proofreading text
-        if: ${{ env.PROOFREAD_EXPORT_MODE == 'text' }}
+        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'text') }}
         uses: actions/upload-artifact@v4
         with:
           name: translated-text-proofread
