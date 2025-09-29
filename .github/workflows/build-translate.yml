@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-translate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,8 +32,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
-        shell: bash
         run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
@@ -37,34 +48,41 @@ jobs:
             pip install pandas openpyxl python-dateutil
           fi
 
-      # Step 1: Excel -> converted_cookie_data.json
+      # -------- Step 1: Excel -> converted_cookie_data.json --------
       - name: Convert Excel to converted_cookie_data.json
-        shell: bash
         run: |
+          set -euo pipefail
+          echo "Repository contents (top-level):"
+          ls -la
+
           python excel-to-json.py
           test -f converted_cookie_data.json || { echo "::error::converted_cookie_data.json was not created"; exit 1; }
 
-      # Step 2: Translate JSON into all locales (pretty + minified)
+          echo "Head of converted_cookie_data.json:"
+          head -n 50 converted_cookie_data.json || true
+
+      # -------- Step 2: Translate JSON for all locales (pretty + minified) --------
       - name: Generate localized JSONs (pretty + minified)
         id: translate
         shell: bash
         run: |
           set -euo pipefail
-
-          # Force-safe: script handles existing files named 'out'/'minified'
+          # Force-safe: deletes FILEs named out/minified if they exist, or creates fallbacks.
           python json_translator_rewrite.py --translate_keys --force
 
+          # Determine actual pretty/minified directories (out or fallback out_build-*)
           OUT_DIR="out"
           MIN_DIR="minified"
 
-          # Fallback if script created timestamped directories
           if [ ! -d "$OUT_DIR" ]; then
             OUT_DIR="$(ls -d out_build-* 2>/dev/null | head -n1 || true)"
           fi
+
           if [ ! -d "$MIN_DIR" ]; then
             MIN_DIR="$(ls -d minified_build-* 2>/dev/null | head -n1 || true)"
           fi
 
+          # Validate
           if [ -z "$OUT_DIR" ] || [ ! -d "$OUT_DIR" ]; then
             echo "::error::Pretty output directory not found."
             exit 1
@@ -74,81 +92,42 @@ jobs:
             exit 1
           fi
 
+          echo "Using pretty dir: $OUT_DIR"
+          echo "Using minified dir: $MIN_DIR"
+          test -n "$(ls -A "$OUT_DIR")" || { echo "::error::No files in $OUT_DIR"; exit 1; }
+          test -n "$(ls -A "$MIN_DIR")" || { echo "::error::No files in $MIN_DIR"; exit 1; }
+
           echo "out_dir=$OUT_DIR" >> "$GITHUB_OUTPUT"
           echo "min_dir=$MIN_DIR" >> "$GITHUB_OUTPUT"
 
-      # Step 3: Export only the pretty JSONs (out/) to CSV for proofreading
-      - name: Export translated JSONs (out/) to CSV (one per locale)
-        shell: bash
-        env:
-          OUT_DIR: ${{ steps.translate.outputs.out_dir }}
-        run: |
-          set -euo pipefail
-          mkdir -p proofread_csv
-          python - << 'PY'
-import json, csv, os, sys, glob
-
-out_dir = os.environ.get("OUT_DIR", "out")
-dest = "proofread_csv"
-os.makedirs(dest, exist_ok=True)
-
-files = sorted(glob.glob(os.path.join(out_dir, "cookie_data_*.json")))
-if not files:
-    print("No translated JSONs found in", out_dir, file=sys.stderr)
-    sys.exit(1)
-
-for path in files:
-    locale = os.path.splitext(os.path.basename(path))[0].replace("cookie_data_", "")
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    # Collect localized column names across cookie_list items
-    dynamic_cols = set()
-    for block in data.get("notice_table", []):
-        for item in block.get("cookie_list", []):
-            dynamic_cols.update(item.keys())
-    dynamic_cols = list(dynamic_cols)
-
-    header = ["cookie_category", "category_description"] + dynamic_cols
-    rows = []
-    for block in data.get("notice_table", []):
-        cat = block.get("cookie_category", "")
-        desc = block.get("category_description", "")
-        for item in block.get("cookie_list", []):
-            row = {h: "" for h in header}
-            row["cookie_category"] = cat
-            row["category_description"] = desc
-            for k, v in item.items():
-                row[k] = v
-            rows.append(row)
-
-    csv_path = os.path.join(dest, f"{locale}.csv")
-    with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=header)
-        writer.writeheader()
-        writer.writerows(rows)
-    print("Wrote", csv_path)
-PY
-          ls -la proofread_csv | head -n 50 || true
-
-      # Step 4: Upload artifacts
-      - name: Upload pretty JSONs (out/)
+      # -------- Step 3: Upload artifacts --------
+      - name: Upload pretty JSONs
         uses: actions/upload-artifact@v4
         with:
           name: cookie-jsons-pretty
           path: ${{ steps.translate.outputs.out_dir }}
           if-no-files-found: error
 
-      - name: Upload minified JSONs (minified/)
+      - name: Upload minified JSONs
         uses: actions/upload-artifact@v4
         with:
           name: cookie-jsons-minified
           path: ${{ steps.translate.outputs.min_dir }}
           if-no-files-found: error
 
-      - name: Upload proofreading CSVs
-        uses: actions/upload-artifact@v4
-        with:
-          name: translated-csv-proofread
-          path: proofread_csv/
-          if-no-files-found: error
+      # -------- Optional diagnostics --------
+      - name: Show sample outputs
+        if: always()
+        run: |
+          echo "== Pretty files =="
+          ls -la "${{ steps.translate.outputs.out_dir }}" | head -n 40 || true
+          echo "== Minified files =="
+          ls -la "${{ steps.translate.outputs.min_dir }}" | head -n 40 || true
+
+      # -------- OPTIONAL: commit generated files back to repo (disabled) --------
+      # - name: Commit generated files
+      #   uses: stefanzweifel/git-auto-commit-action@v5
+      #   with:
+      #     commit_message: "chore: update localized cookie JSONs"
+      #     file_pattern: ${{ steps.translate.outputs.out_dir }}/** ${{ steps.translate.outputs.min_dir }}/**
+      #     branch: ${{ github.ref_name }}
