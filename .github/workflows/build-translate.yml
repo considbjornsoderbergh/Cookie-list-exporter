@@ -48,30 +48,21 @@ jobs:
             pip install pandas openpyxl python-dateutil
           fi
 
-      # --- Step 1: Excel -> JSON ---
-      # Try common CLI signatures. If your excel-to-json.py needs specific flags,
-      # adjust the first command and remove the fallbacks.
+      # Step 1: Excel -> converted_cookie_data.json
       - name: Convert Excel to converted_cookie_data.json
-        shell: bash
         run: |
-          set -e
-          # Try explicit args first (adjust to your script's interface if needed)
-          python excel-to-json.py --input "2Kopia av hm-cookielist.xlsx" --output converted_cookie_data.json || \
-          python excel-to-json.py "2Kopia av hm-cookielist.xlsx" "converted_cookie_data.json" || \
           python excel-to-json.py
+          test -f converted_cookie_data.json || { echo "::error::converted_cookie_data.json was not created"; exit 1; }
 
-          test -f converted_cookie_data.json || { echo "converted_cookie_data.json was not created"; exit 1; }
-
-      # --- Step 2: Translate JSON for all locales ---
-      - name: Generate localized JSONs (pretty + minified)
+      # Step 2: Translate JSON into all locales (pretty + minified)
+      - name: Generate localized JSONs
         run: |
-          # json_translator_rewrite.py already defaults to using files next to the script,
-          # and writes pretty files to ./out and minified files to ./minified.
           python json_translator_rewrite.py --translate_keys
+          test -d out && [ "$(ls -A out)" ] || { echo "::error::No files in out/"; exit 1; }
+          test -d minified && [ "$(ls -A minified)" ] || { echo "::error::No files in minified/"; exit 1; }
 
-      # --- Step 3: Upload artifacts ---
+      # Step 3: Upload artifacts
       - name: Upload pretty JSONs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cookie-jsons-pretty
@@ -79,12 +70,20 @@ jobs:
           if-no-files-found: error
 
       - name: Upload minified JSONs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cookie-jsons-minified
           path: minified/
           if-no-files-found: error
+
+      # Optional: Inspect outputs for debugging
+      - name: Show sample outputs
+        if: always()
+        run: |
+          echo "== out/ sample =="
+          ls -la out | head -n 20 || true
+          echo "== minified/ sample =="
+          ls -la minified | head -n 20 || true
 
       # OPTIONAL: commit generated files back to repo (uncomment to enable)
       # - name: Commit generated files
