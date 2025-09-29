@@ -1,232 +1,76 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-excel-to-json.py
-
-Converts an Excel cookie list into `converted_cookie_data.json` ready for translation.
-
-Usage:
-    python excel-to-json.py
-    python excel-to-json.py --input "cookies.xlsx" --output converted_cookie_data.json
-
-Defaults:
-- If --input is not provided, the script will pick the first .xlsx in the current directory.
-- If --output is not provided, writes to converted_cookie_data.json.
-
-Expected/typical columns (adjust detection below if yours differ):
-- Category (e.g., "Strictly necessary", "Performance", "Functional", "Marketing", "Social media")
-- Cookie subgroup
-- Cookies
-- Cookies used (e.g., "First party", "Third party")
-- Lifespan (e.g., "395 Days", "Less than one day", "Session", "2 Years")
-"""
-
-import argparse
-import os
-import sys
-import json
-import re
-from typing import Optional
-
 import pandas as pd
+import json
+from pathlib import Path
 
-# Map human-readable category to placeholder keys used by the translator
-CATEGORY_TO_PLACEHOLDERS = {
-    "strictly necessary": {
-        "name": "StrictlynecessaryCategoryName",
-        "desc": "Strictlynecessarycategorydescription",
-    },
-    "performance": {
-        "name": "PerformancecookiesCategoryName",
-        "desc": "Performancecookiescategorydescription",
-    },
-    "functional": {
-        "name": "FunctionalcookiesCategoryName",
-        "desc": "Functionalcookiescategorydescription",
-    },
-    "marketing": {
-        "name": "MarketingcookiesCategoryName",
-        "desc": "Marketingcookiescategorydescription",
-    },
-    "social media": {
-        "name": "SocialmediacookiesCategoryName",
-        "desc": "Socialmediacookiescategorydescription",
-    },
-}
+# === Inputs ===
+excel_file = '2Kopia av hm-cookielist.xlsx'  # adjust if needed
 
+# === Load & normalize ===
+df = pd.read_excel(excel_file, engine='openpyxl')
 
-def find_first_excel() -> Optional[str]:
-    """Return the first .xlsx filename in the current directory, if any."""
-    for name in sorted(os.listdir(".")):
-        if name.lower().endswith(".xlsx"):
-            return name
-    return None
+# Make sure we have consistent column names in the expected order
+# (adjust these if your sheet has different headers)
+df.columns = [
+    'Cookie subgroup',       # e.g., hm.com
+    'Cookies used',          # e.g., First party / Third party
+    'Cookies',               # e.g., _ga, _gid, ...
+    'Lifespan',              # e.g., 399 Days, Session, ...
+    'Cookie category',       # (not used in the final table, but fine to keep)
+    'Cookie description'     # (not used in the final table)
+][:len(df.columns)]
 
+# Trim whitespace & drop fully empty rows
+for col in ['Cookie subgroup', 'Cookies used', 'Cookies', 'Lifespan']:
+    if col in df.columns:
+        df[col] = df[col].astype(str).str.strip()
+df = df.dropna(how='all')
 
-def normalize(s) -> str:
-    """Coerce to string and strip whitespace; return empty string for None/NaN."""
-    if s is None:
-        return ""
-    # pd.isna handles NaN/NaT
-    try:
-        if isinstance(s, float) and pd.isna(s):
-            return ""
-    except Exception:
-        pass
-    return str(s).strip()
+# Keep only the columns we need for the subgroup table
+needed = ['Cookie subgroup', 'Cookies used', 'Cookies', 'Lifespan']
+df_small = df[needed].copy()
 
+# Optional: preserve original row order within each subgroup when aggregating
+# by adding an index to sort back after a groupby
+df_small['_row_order'] = range(len(df_small))
 
-def cookies_used_placeholder(text: str) -> str:
-    """
-    Map "First party"/"Third party" to placeholders the translator knows.
-    Defaults to First party if ambiguous.
-    """
-    t = normalize(text).lower()
-    if "third" in t:
-        return "CookiePolicyTableThirdpParty"
-    return "CookiePolicyTableFirstParty"
+# === Group & aggregate ===
+rows = []
+for subgroup, g in df_small.groupby('Cookie subgroup', dropna=True):
+    g_sorted = g.sort_values('_row_order')
 
+    cookies_list   = g_sorted['Cookies'].dropna().tolist()
+    lifespan_list  = g_sorted['Lifespan'].dropna().tolist()
 
-def parse_lifespan_placeholder(text: str) -> str:
-    """
-    Turn human text like:
-      - "395 Days" -> "395 CookiePolicyTableDays"
-      - "2 Years"  -> "2 CookiePolicyTableYears"
-      - "Session"  -> " CookiePolicyTableSession"
-      - "Less than one day" -> " CookiePolicyTableFirstPartyLessThanOneDy"
+    # "Cookies used" can sometimes vary inside a subgroup. Handle that gracefully.
+    used_unique = [u for u in g_sorted['Cookies used'].dropna().unique().tolist() if u]
+    if len(used_unique) == 1:
+        cookies_used_out = used_unique[0]
+    elif len(used_unique) == 0:
+        cookies_used_out = ''
+    else:
+        cookies_used_out = 'Mixed: ' + ', '.join(used_unique)
 
-    Robust to leading/trailing spaces, numeric-only cells, and NaN.
-    """
-    # Handle None/NaN up front
-    if text is None or (isinstance(text, float) and pd.isna(text)):
-        return ""
+    rows.append({
+        'Cookie subgroup': subgroup,
+        'Cookies': ', '.join(cookies_list),
+        'Cookies used': cookies_used_out,
+        'Lifespan': ', '.join(lifespan_list),
+    })
 
-    # Always coerce to string and strip whitespace
-    raw = str(text).strip()
-    t = raw.lower()
+result_df = pd.DataFrame(rows)
 
-    # session
-    if t == "session":
-        return " CookiePolicyTableSession"
+# Optional: sort by subgroup name
+result_df = result_df.sort_values('Cookie subgroup', kind='stable').reset_index(drop=True)
 
-    # less than one day (allow variations)
-    if "less" in t and "one" in t and "day" in t:
-        return " CookiePolicyTableFirstPartyLessThanOneDy"
+# === Write outputs ===
+# CSV for Excel
+csv_path = Path('cookie_subgroups_table.csv')
+result_df.to_csv(csv_path, index=False, encoding='utf-8')
 
-    # number + unit (day[s]/year[s])
-    m = re.match(r"^(\d+)\s*(day|days|year|years)$", t)
-    if m:
-        num = m.group(1)
-        unit = m.group(2)
-        if unit.startswith("day"):
-            return f"{num} CookiePolicyTableDays"
-        else:
-            return f"{num} CookiePolicyTableYears"
+# JSON (if you still need machine-readable output)
+json_path = Path('cookie_subgroups_table.json')
+with open(json_path, 'w', encoding='utf-8') as f:
+    json.dump(result_df.to_dict(orient='records'), f, indent=2, ensure_ascii=False)
 
-    # plain number only -> assume days
-    m2 = re.match(r"^(\d+)$", t)
-    if m2:
-        return f"{m2.group(1)} CookiePolicyTableDays"
-
-    # Fallback: return stripped original (translator may still replace any tokens it recognizes)
-    return raw
-
-
-def category_placeholders(text: str) -> dict:
-    """
-    Find best category placeholder mapping based on Category cell.
-    Falls back to "Strictly necessary" if unknown/missing.
-    """
-    t = normalize(text).lower()
-    for k, v in CATEGORY_TO_PLACEHOLDERS.items():
-        if t == k or t.startswith(k):
-            return v
-    return CATEGORY_TO_PLACEHOLDERS["strictly necessary"]
-
-
-def transform_excel_to_json(xlsx_path: str) -> dict:
-    """
-    Read the first sheet and build the JSON that the translator expects.
-    Adjust the column inference if your headers differ.
-    """
-    df = pd.read_excel(xlsx_path, sheet_name=0)
-
-    # Try to infer common column names (case-insensitive)
-    cols = {c.lower(): c for c in df.columns}
-    get = lambda key: cols.get(key.lower())
-
-    col_category = get("Category") or get("cookie category") or get("category")
-    col_subgroup = get("Cookie subgroup") or get("subgroup") or get("cookie_subgroup")
-    col_cookies  = get("Cookies") or get("cookie") or get("cookie name")
-    col_used     = get("Cookies used") or get("used") or get("party")   # first/third party
-    col_lifespan = get("Lifespan") or get("duration") or get("expires")
-
-    # Basic validation
-    required_map = {
-        "Cookie subgroup": col_subgroup,
-        "Cookies": col_cookies,
-        "Cookies used": col_used,
-        "Lifespan": col_lifespan,
-    }
-    missing = [name for name, col in required_map.items() if not col]
-    if missing:
-        print(f"ERROR: Missing expected columns in Excel: {', '.join(missing)}", file=sys.stderr)
-        print(f"Found columns: {list(df.columns)}", file=sys.stderr)
-        sys.exit(2)
-
-    # If no category column, assign a default for the whole sheet
-    if not col_category:
-        df["_Category_"] = "Strictly necessary"
-        col_category = "_Category_"
-
-    output = {"notice_table": []}
-
-    # Group rows by category to attach name/description placeholders per block
-    for cat_value, group in df.groupby(col_category):
-        cat_ph = category_placeholders(cat_value)
-        block = {
-            "cookie_category": cat_ph["name"],
-            "category_description": cat_ph["desc"],
-            "cookie_list": []
-        }
-
-        for _, row in group.iterrows():
-            subgroup = normalize(row.get(col_subgroup, ""))
-            cookie = normalize(row.get(col_cookies, ""))
-            used = cookies_used_placeholder(row.get(col_used, "First party"))
-            life = parse_lifespan_placeholder(row.get(col_lifespan, ""))  # ← trimmed & robust
-
-            block["cookie_list"].append({
-                "Cookie subgroup": subgroup,
-                "Cookies": cookie,
-                "Cookies used": used,
-                "Lifespan": life
-            })
-
-        output["notice_table"].append(block)
-
-    return output
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", help="Path to source .xlsx (default: first .xlsx in current directory)")
-    parser.add_argument("--output", default="converted_cookie_data.json", help="Output JSON filename")
-    args = parser.parse_args()
-
-    xlsx = args.input or find_first_excel()
-    if not xlsx or not os.path.exists(xlsx):
-        print("ERROR: Excel file not found. Use --input or place an .xlsx in the repo root.", file=sys.stderr)
-        sys.exit(2)
-
-    print(f"Reading Excel file: {xlsx}")
-    data = transform_excel_to_json(xlsx)
-
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    print(f"Wrote {args.output}")
-
-
-if __name__ == "__main__":
-    main()
+print(f'Wrote: {csv_path.resolve()}')
+print(f'Wrote: {json_path.resolve()}')
