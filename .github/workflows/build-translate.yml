@@ -15,16 +15,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: build-translate-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      # Proofreading export mode: "csv" (default) or "text"
-      PROOFREAD_EXPORT_MODE: csv
 
     steps:
       - name: Checkout
@@ -34,14 +27,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         shell: bash
@@ -64,11 +49,15 @@ jobs:
         id: translate
         shell: bash
         run: |
+          set -euo pipefail
+
+          # Force-safe: script handles existing files named 'out'/'minified'
           python json_translator_rewrite.py --translate_keys --force
 
           OUT_DIR="out"
           MIN_DIR="minified"
 
+          # Fallback if script created timestamped directories
           if [ ! -d "$OUT_DIR" ]; then
             OUT_DIR="$(ls -d out_build-* 2>/dev/null | head -n1 || true)"
           fi
@@ -88,15 +77,13 @@ jobs:
           echo "out_dir=$OUT_DIR" >> "$GITHUB_OUTPUT"
           echo "min_dir=$MIN_DIR" >> "$GITHUB_OUTPUT"
 
-      # ----------------- Proofreading export from out/ only -----------------
-
-      # CSV mode: one CSV per locale in proofread_csv/
-      - name: Export translated JSONs to CSV (one per locale)
-        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'csv') }}
+      # Step 3: Export only the pretty JSONs (out/) to CSV for proofreading
+      - name: Export translated JSONs (out/) to CSV (one per locale)
         shell: bash
+        env:
+          OUT_DIR: ${{ steps.translate.outputs.out_dir }}
         run: |
           set -euo pipefail
-          export OUT_DIR="${{ steps.translate.outputs.out_dir }}"
           mkdir -p proofread_csv
           python - << 'PY'
 import json, csv, os, sys, glob
@@ -115,7 +102,7 @@ for path in files:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # union of localized column names
+    # Collect localized column names across cookie_list items
     dynamic_cols = set()
     for block in data.get("notice_table", []):
         for item in block.get("cookie_list", []):
@@ -124,7 +111,6 @@ for path in files:
 
     header = ["cookie_category", "category_description"] + dynamic_cols
     rows = []
-
     for block in data.get("notice_table", []):
         cat = block.get("cookie_category", "")
         desc = block.get("category_description", "")
@@ -143,73 +129,26 @@ for path in files:
         writer.writerows(rows)
     print("Wrote", csv_path)
 PY
-          echo "CSV export complete."
           ls -la proofread_csv | head -n 50 || true
 
+      # Step 4: Upload artifacts
+      - name: Upload pretty JSONs (out/)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cookie-jsons-pretty
+          path: ${{ steps.translate.outputs.out_dir }}
+          if-no-files-found: error
+
+      - name: Upload minified JSONs (minified/)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cookie-jsons-minified
+          path: ${{ steps.translate.outputs.min_dir }}
+          if-no-files-found: error
+
       - name: Upload proofreading CSVs
-        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'csv') }}
         uses: actions/upload-artifact@v4
         with:
           name: translated-csv-proofread
           path: proofread_csv/
-          if-no-files-found: error
-
-      # Text mode: single UTF-8 text file with tables
-      - name: Export translated JSONs to a single text file (tables)
-        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'text') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          export OUT_DIR="${{ steps.translate.outputs.out_dir }}"
-          python - << 'PY'
-import json, os, sys, glob
-
-out_dir = os.environ.get("OUT_DIR", "out")
-outfile = "proofread_tables.txt"
-
-files = sorted(glob.glob(os.path.join(out_dir, "cookie_data_*.json")))
-if not files:
-    print("No translated JSONs found in", out_dir, file=sys.stderr)
-    sys.exit(1)
-
-def line(): return "-" * 80 + "\n"
-
-with open(outfile, "w", encoding="utf-8") as out:
-    for path in files:
-        locale = os.path.splitext(os.path.basename(path))[0].replace("cookie_data_", "")
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        out.write(f"=== {locale} ===\n")
-        for block in data.get("notice_table", []):
-            cat = block.get("cookie_category", "")
-            desc = block.get("category_description", "")
-            out.write(line())
-            out.write(f"Category: {cat}\n")
-            out.write(f"Description: {desc}\n")
-            out.write(line())
-
-            keys = set()
-            for item in block.get("cookie_list", []):
-                keys.update(item.keys())
-            keys = list(keys)
-
-            out.write(" | ".join(keys) + "\n")
-            out.write("-|-".join("-" * len(k) for k in keys) + "\n")
-
-            for item in block.get("cookie_list", []):
-                out.write(" | ".join(str(item.get(k, "")) for k in keys) + "\n")
-            out.write("\n")
-        out.write("\n")
-
-print(f"Wrote {outfile}")
-PY
-          ls -lh proofread_tables.txt
-
-      - name: Upload proofreading text
-        if: ${{ eq(env.PROOFREAD_EXPORT_MODE, 'text') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: translated-text-proofread
-          path: proofread_tables.txt
           if-no-files-found: error
