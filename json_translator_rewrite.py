@@ -69,13 +69,16 @@ def main():
         data = load_json(input_file)
 
         for locale, tmap in translations.items():
+            # Sanitize locale to use only underscores
+            safe_locale = re.sub(r'[^A-Za-z0-9]+', '_', locale)
+
             translated = translate_structure(deepcopy(data), tmap, translate_keys=args.translate_keys)
 
-            pretty_path = os.path.join(args.outdir, f"{base_name}_{locale}.json")
+            pretty_path = os.path.join(args.outdir, f"{base_name}_{safe_locale}.json")
             with open(pretty_path, "w", encoding="utf-8") as f:
                 json.dump(translated, f, ensure_ascii=False, indent=2)
 
-            min_path = os.path.join(args.minout, f"{base_name}_{locale}.min.json")
+            min_path = os.path.join(args.minout, f"{base_name}_{safe_locale}.min.json")
             with open(min_path, "w", encoding="utf-8") as f:
                 json.dump(translated, f, ensure_ascii=False, separators=(',', ':'))
 
