@@ -3,6 +3,14 @@ import json
 import os
 from collections import defaultdict
 
+# Desired category order
+desired_order = [
+    'Strictly necessary cookies',
+    'Performance Cookies',
+    'Functional Cookies',
+    'Marketing Cookies'
+]
+
 excel_files = [f for f in os.listdir('.') if f.endswith('.xlsx')]
 
 for excel_file in excel_files:
@@ -32,13 +40,15 @@ for excel_file in excel_files:
             }
             category_data[category]['cookie_list'].append(domain_entry)
 
+    # Build notice_table in the desired order
     notice_table = []
-    for category, data in category_data.items():
-        notice_table.append({
-            'cookie_category': category,
-            'category_description': data['category_description'],
-            'cookie_list': data['cookie_list']
-        })
+    for category in desired_order:
+        if category in category_data:
+            notice_table.append({
+                'cookie_category': category,
+                'category_description': category_data[category]['category_description'],
+                'cookie_list': category_data[category]['cookie_list']
+            })
 
     final_json = {'notice_table': notice_table}
 
@@ -46,4 +56,3 @@ for excel_file in excel_files:
     json_filename = f"{base_name}_grouped.json"
     with open(json_filename, "w", encoding="utf-8") as f:
         json.dump(final_json, f, indent=4, ensure_ascii=False)
-
