@@ -15,14 +15,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: build-translate-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,102 +27,32 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install pandas openpyxl python-dateutil
+            pip install pandas openpyxl
           fi
 
-      # -------- Step 1: Excel -> converted_cookie_data.json --------
-      - name: Convert Excel to converted_cookie_data.json
+      - name: Convert all Excel files to grouped JSON
         run: |
-          set -euo pipefail
-          echo "Repository contents (top-level):"
-          ls -la
-
           python excel-to-json.py
-          test -f converted_cookie_data.json || { echo "::error::converted_cookie_data.json was not created"; exit 1; }
 
-          echo "Head of converted_cookie_data.json:"
-          head -n 50 converted_cookie_data.json || true
-
-      # -------- Step 2: Translate JSON for all locales (pretty + minified) --------
-      - name: Generate localized JSONs (pretty + minified)
-        id: translate
-        shell: bash
+      - name: Translate all grouped JSONs
         run: |
-          set -euo pipefail
-          # Force-safe: deletes FILEs named out/minified if they exist, or creates fallbacks.
-          python json_translator_rewrite.py --translate_keys --force
+          python json_translator_rewrite.py --translate_keys
 
-          # Determine actual pretty/minified directories (out or fallback out_build-*)
-          OUT_DIR="out"
-          MIN_DIR="minified"
-
-          if [ ! -d "$OUT_DIR" ]; then
-            OUT_DIR="$(ls -d out_build-* 2>/dev/null | head -n1 || true)"
-          fi
-
-          if [ ! -d "$MIN_DIR" ]; then
-            MIN_DIR="$(ls -d minified_build-* 2>/dev/null | head -n1 || true)"
-          fi
-
-          # Validate
-          if [ -z "$OUT_DIR" ] || [ ! -d "$OUT_DIR" ]; then
-            echo "::error::Pretty output directory not found."
-            exit 1
-          fi
-          if [ -z "$MIN_DIR" ] || [ ! -d "$MIN_DIR" ]; then
-            echo "::error::Minified output directory not found."
-            exit 1
-          fi
-
-          echo "Using pretty dir: $OUT_DIR"
-          echo "Using minified dir: $MIN_DIR"
-          test -n "$(ls -A "$OUT_DIR")" || { echo "::error::No files in $OUT_DIR"; exit 1; }
-          test -n "$(ls -A "$MIN_DIR")" || { echo "::error::No files in $MIN_DIR"; exit 1; }
-
-          echo "out_dir=$OUT_DIR" >> "$GITHUB_OUTPUT"
-          echo "min_dir=$MIN_DIR" >> "$GITHUB_OUTPUT"
-
-      # -------- Step 3: Upload artifacts --------
       - name: Upload pretty JSONs
         uses: actions/upload-artifact@v4
         with:
           name: cookie-jsons-pretty
-          path: ${{ steps.translate.outputs.out_dir }}
+          path: out
           if-no-files-found: error
 
       - name: Upload minified JSONs
         uses: actions/upload-artifact@v4
         with:
           name: cookie-jsons-minified
-          path: ${{ steps.translate.outputs.min_dir }}
+          path: minified
           if-no-files-found: error
-
-      # -------- Optional diagnostics --------
-      - name: Show sample outputs
-        if: always()
-        run: |
-          echo "== Pretty files =="
-          ls -la "${{ steps.translate.outputs.out_dir }}" | head -n 40 || true
-          echo "== Minified files =="
-          ls -la "${{ steps.translate.outputs.min_dir }}" | head -n 40 || true
-
-      # -------- OPTIONAL: commit generated files back to repo (disabled) --------
-      # - name: Commit generated files
-      #   uses: stefanzweifel/git-auto-commit-action@v5
-      #   with:
-      #     commit_message: "chore: update localized cookie JSONs"
-      #     file_pattern: ${{ steps.translate.outputs.out_dir }}/** ${{ steps.translate.outputs.min_dir }}/**
-      #     branch: ${{ github.ref_name }}
