@@ -5,12 +5,12 @@ from collections import defaultdict
 
 excel_files = [f for f in os.listdir('.') if f.endswith('.xlsx')]
 
-# Define the desired category order
+# Define the desired category order (using the placeholder keys)
 category_order = [
-    'Strictly necessary cookies',
-    'Performance cookies',
-    'Functional cookies',
-    'Marketing cookies'
+    'StrictlynecessaryCategoryName',
+    'PerformancecookiesCategoryName',
+    'FunctionalcookiesCategoryName',
+    'MarketingcookiesCategoryName'
 ]
 
 for excel_file in excel_files:
